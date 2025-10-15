@@ -1,0 +1,203 @@
+// -------------------------
+// Configurable Variables (Zapier input fields)
+// -------------------------
+
+const title = inputData.title;
+const description = inputData.description;
+const tags = inputData.tags ? inputData.tags.split(",") : [];
+
+const price = inputData.price || 2.1;
+const quantity = inputData.quantity || 10;
+
+// Resource URLs (actual downloadable product files)
+const resourceUrls = [
+  inputData.resourceUrl1,
+  inputData.resourceUrl2
+];
+
+// Image URLs (first 12 gallery images, last 2 are previews)
+const imageUrls = [
+  inputData.mainImage,
+  inputData.image2,
+  inputData.image3,
+  inputData.image4,
+  inputData.image5,
+  inputData.image6,
+  inputData.image7,
+  inputData.image8,
+  inputData.image9,
+  inputData.image10,
+  inputData.image11,
+  inputData.image12,
+  inputData.image13, // Preview 1024x1024
+  inputData.image14  // Preview 4096x4096
+];
+
+const shopName = inputData.shopName;
+const clientId = inputData.clientId;
+const clientSecret = inputData.clientSecret;
+const refreshToken = inputData.refreshToken;
+
+const taxonomyId = 502; // Clip Art
+const whoMade = inputData.whoMade || "i_did";
+const whenMade = inputData.whenMade || "made_to_order";
+
+// In-memory token store
+let accessToken = null;
+let accessTokenExpiry = 0;
+
+// -------------------------
+// Get a valid access token
+// -------------------------
+async function getValidAccessToken() {
+  const now = Math.floor(Date.now() / 1000);
+
+  if (accessToken && now < accessTokenExpiry - 30) { // reuse if not expired
+    return accessToken;
+  }
+
+  if (!clientId || !clientSecret || !refreshToken) {
+    throw new Error("clientId, clientSecret, and refreshToken are required to get an access token");
+  }
+
+  const tokenUrl = "https://api.etsy.com/v3/public/oauth/token";
+  const payload = new URLSearchParams({
+    grant_type: "refresh_token",
+    client_id: clientId,
+    client_secret: clientSecret,
+    refresh_token: refreshToken
+  });
+
+  const res = await fetch(tokenUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: payload.toString()
+  });
+
+  const data = await res.json();
+  if (!res.ok) throw new Error(`Error fetching access token: ${JSON.stringify(data)}`);
+
+  accessToken = data.access_token;
+  accessTokenExpiry = now + (data.expires_in || 3600); // expires_in is in seconds
+  return accessToken;
+}
+
+// -------------------------
+// Get shop ID from shop name
+// -------------------------
+async function getShopId() {
+  const token = await getValidAccessToken();
+  if (!shopName) throw new Error("shopName is required to fetch shopId");
+
+  const url = `https://openapi.etsy.com/v3/application/shops/${shopName}`;
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  const data = await res.json();
+
+  if (!res.ok) throw new Error(`Error fetching shop: ${JSON.stringify(data)}`);
+  if (!data.shop_id) throw new Error("No shop_id found for this shop name");
+
+  return data.shop_id;
+}
+
+// -------------------------
+// Create Draft Listing
+// -------------------------
+async function createListing(shopId) {
+  const token = await getValidAccessToken();
+  const url = `https://openapi.etsy.com/v3/application/shops/${shopId}/listings`;
+  const payload = {
+    title,
+    description,
+    price,
+    quantity,
+    tags,
+    who_made: whoMade,
+    when_made: whenMade,
+    taxonomy_id: taxonomyId,
+    type: "download"
+  };
+
+  const res = await fetch(url, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`Error creating listing: ${JSON.stringify(data)}`);
+  return data;
+}
+
+// -------------------------
+// Upload Images (first 12)
+// -------------------------
+async function uploadImages(listingId) {
+  const token = await getValidAccessToken();
+  for (let i = 0; i < 12; i++) {
+    const imgUrl = imageUrls[i];
+    if (!imgUrl) continue;
+
+    const url = `https://openapi.etsy.com/v3/application/listings/${listingId}/images`;
+    const payload = { image_url: imgUrl, rank: i + 1 };
+
+    const res = await fetch(url, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(`Error uploading image: ${JSON.stringify(err)}`);
+    }
+  }
+}
+
+// -------------------------
+// Upload digital files (resources + previews)
+// -------------------------
+async function uploadResources(listingId) {
+  const token = await getValidAccessToken();
+
+  // Standard downloadable resources
+  for (let url of resourceUrls) {
+    if (!url) continue;
+    const endpoint = `https://openapi.etsy.com/v3/application/listings/${listingId}/files`;
+    const payload = { file_url: url, name: "Digital File" };
+
+    const res = await fetch(endpoint, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(`Error uploading file: ${JSON.stringify(err)}`);
+    }
+  }
+
+  // Previews (images 13 & 14)
+  const previews = [
+    { url: imageUrls[12], name: "Preview 1024x1024" },
+    { url: imageUrls[13], name: "Preview 4096x4096" }
+  ];
+
+  for (const p of previews) {
+    if (!p.url) continue;
+    const res = await fetch(`https://openapi.etsy.com/v3/application/listings/${listingId}/files`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ file_url: p.url, name: p.name })
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(`Error uploading ${p.name}: ${JSON.stringify(err)}`);
+    }
+  }
+}
+
+// -------------------------
+// Run Flow
+// -------------------------
+return (async () => {
+  const shopId = await getShopId();
+  const listing = await createListing(shopId);
+  const listingId = listing.listing_id;
+
+  await uploadImages(listingId);
+  await uploadResources(listingId);
+
+  return {
+    success: true,
+    shopId,
+    listingId,
+    listingUrl: `https://www.etsy.com/listing/${listingId}`
+  };
+})();
